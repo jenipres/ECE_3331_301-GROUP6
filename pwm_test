@@ -1,73 +1,60 @@
+// MSP430FR6989 + L298N simple motor test (no PWM)
+// ENA = P2.6, ENB = P2.7
+// IN1 = P1.3, IN2 = P3.0, IN3 = P3.1, IN4 = P2.3
+
+#include <msp430.h>
 #include <msp430fr6989.h>
 
-#define F_CPU    8000000UL
-#define PWM_HZ   1000UL               // 1 kHz PWM
-#define PERIOD   (F_CPU / PWM_HZ)     // 8000
+#define IN1 BIT3   // P1.3
+#define IN2 BIT0   // P3.0
+#define IN3 BIT1   // P3.1
+#define IN4 BIT3   // P2.3
+#define ENA BIT6   // P2.6
+#define ENB BIT7   // P2.7
 
-/* Direction pins */
-#define IN1_BIT  BIT3   // P1.3
-#define IN2_BIT  BIT0   // P3.0
-#define IN3_BIT  BIT1   // P3.1
-#define IN4_BIT  BIT3   // P2.3
-
-/* PWM pins */
-#define ENA_BIT  BIT3   // P3.3 (TA1.1)
-#define ENB_BIT  BIT6   // P3.6 (TB0.2)
-
-#define LED1     BIT0   // P1.0 (onboard LED)
-
-static void clock_8MHz(void){
-    CSCTL0_H = CSKEY_H;
-    CSCTL1 = DCOFSEL_6;  // DCO ~8 MHz
-    CSCTL2 = SELM__DCOCLK | SELS__DCOCLK | SELA__VLOCLK;
-    CSCTL3 = DIVM__1 | DIVS__1 | DIVA__1;
-    CSCTL0_H = 0;
+void delay_ms(unsigned int ms) {
+    while (ms--) __delay_cycles(16000); // ~1 ms @16 MHz
 }
 
-int main(void){
-    WDTCTL = WDTPW | WDTHOLD; // stop watchdog
-    clock_8MHz();
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;      // Stop watchdog
+    PM5CTL0 &= ~LOCKLPM5;          // Unlock GPIO from high-impedance
 
-    // LED for heartbeat
-    P1DIR |= LED1;
-    P1OUT &= ~LED1;
+    // Set direction for pins
+    P1DIR |= IN1;
+    P3DIR |= IN2 | IN3;
+    P2DIR |= IN4 | ENA | ENB;
 
-    // ---- Direction pins ----
-    P1DIR |= IN1_BIT; P1OUT &= ~IN1_BIT;   // P1.3
-    P3DIR |= IN2_BIT; P3OUT &= ~IN2_BIT;   // P3.0
-    P3DIR |= IN3_BIT; P3OUT &= ~IN3_BIT;   // P3.1
-    P2DIR |= IN4_BIT; P2OUT &= ~IN4_BIT;   // P2.3
+    // Enable the motors
+    P2OUT |= ENA | ENB;
 
-    // Forward direction
-    P1OUT |= IN1_BIT;   // IN1=1
-    P3OUT &= ~IN2_BIT;  // IN2=0
-    P3OUT |= IN3_BIT;   // IN3=1
-    P2OUT &= ~IN4_BIT;  // IN4=0
+    while (1) {
+        // Forward
+        P1OUT |= IN1;   // IN1 = 1
+        P3OUT &= ~IN2;  // IN2 = 0
+        P3OUT |= IN3;   // IN3 = 1
+        P2OUT &= ~IN4;  // IN4 = 0
+        delay_ms(2000);
 
-    // ---- PWM A: P3.3 = TA1.1 ----
-    P3DIR  |= ENA_BIT;
-    P3SEL1 |= ENA_BIT;
-    P3SEL0 &= ~ENA_BIT;
+        // Stop
+        P1OUT &= ~IN1;
+        P3OUT &= ~IN2;
+        P3OUT &= ~IN3;
+        P2OUT &= ~IN4;
+        delay_ms(1000);
 
-    TA1CCR0  = PERIOD - 1;
-    TA1CCR1  = (PERIOD * 50) / 100; // 50% duty
-    TA1CCTL1 = OUTMOD_7;            // reset/set
-    TA1CTL   = TASSEL__SMCLK | MC__UP | TACLR;
+        // Reverse
+        P1OUT &= ~IN1;  // IN1 = 0
+        P3OUT |= IN2;   // IN2 = 1
+        P3OUT &= ~IN3;  // IN3 = 0
+        P2OUT |= IN4;   // IN4 = 1
+        delay_ms(2000);
 
-    // ---- PWM B: P3.6 = TB0.2 ----
-    P3DIR  |= ENB_BIT;
-    P3SEL1 |= ENB_BIT;
-    P3SEL0 &= ~ENB_BIT;
-
-    TB0CCR0  = PERIOD - 1;
-    TB0CCR2  = (PERIOD * 50) / 100; // 50% duty
-    TB0CCTL2 = OUTMOD_7;
-    TB0CTL   = TBSSEL__SMCLK | MC__UP | TBCLR;
-
-    // ---- Main loop ----
-    while(1){
-        volatile unsigned long d=400000;
-        P1OUT ^= LED1; // blink LED so you know it’s running
-        while(d--) __no_operation();
+        // Stop
+        P1OUT &= ~IN1;
+        P3OUT &= ~IN2;
+        P3OUT &= ~IN3;
+        P2OUT &= ~IN4;
+        delay_ms(1000);
     }
 }
