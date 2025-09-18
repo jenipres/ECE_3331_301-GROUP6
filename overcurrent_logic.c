@@ -1,108 +1,100 @@
-#include <msp430.h>
-#include <stdint.h>
-#include <stdbool.h>
+// ==== Overcurrent trip config (edit to your hardware) ====
+static const float I_MAX_A        = 1.00f;   // measured loaded max current (amps)
+static const float RSENSE_OHMS    = 0.10f;   // shunt resistor value (ohms)
+static const float SENSE_GAIN     = 1.0f;    // op-amp gain from shunt to ADC (1.0 if none)
+static const float VREF_VOLTS     = 2.5f;    // internal reference voltage used by ADC
 
-/* === Overcurrent Protection API (formerly in header) === */
+// If you want per-channel thresholds later:
+// static const float I_MAX_A_CH0 = 1.00f;  // for P8.6 (A19)
+// static const float I_MAX_A_CH1 = 1.00f;  // for P8.7 (A20)
 
-/* Configure thresholds (ADC counts & ms). Defaults are typical for 0.53 V trip @ 1.2Vref. */
-void OC_Config(uint16_t trip_counts, uint16_t trip_ms, uint16_t clear_ms);
+extern void pwm_enable(bool on);
+extern void pwm_apply(void);
 
-/* Provide callbacks. I’ll call cut_cb() when fault latches, resume_cb() when cleared. */
-void OC_SetCallbacks(void (*cut_cb)(void), void (*resume_cb)(void));
+static volatile uint8_t overcurrent_fault = 0;
 
-/* One-time init: routes P8.7/P8.6 to analog, powers 1.2 V ref, sets up ADC12_B (blocking mode). */
-void OC_Init_A4A5(void);
-
-/* Call this exactly every 1 ms (from YOUR system tick). Pass true while the clear-fault button is held. */
-void OC_1msTask(bool clear_button_pressed);
-
-/* Status / telemetry (optional). */
-bool     OC_IsFault(void);
-uint16_t OC_LatestAdcA(void);   // A4 (P8.7)
-uint16_t OC_LatestAdcB(void);   // A5 (P8.6)
-
-/* === Implementation === */
-
-enum { ST_NORMAL=0, ST_OVER, ST_FAULT };
-static uint8_t  state;
-static uint16_t TRIP_COUNTS = 1800;   // ~0.53 V @ 1.2 V ref
-static uint16_t TRIP_MS      = 50;    // sustain time
-static uint16_t CLEAR_MS     = 1000;  // button hold time
-
-static uint16_t over_ms, btn_ms;
-static uint16_t adcA, adcB;
-static void (*cut_cb)(void);
-static void (*resume_cb)(void);
-
-/* --- tiny ADC helpers (blocking, no ISRs) --- */
-static inline void adc_wait_done(void){ while (ADC12CTL1 & ADC12BUSY); }
-static uint16_t adc_read_inch(uint8_t inch){
-  ADC12CTL0 &= ~ADC12ENC;
-  ADC12MCTL0 = (inch & 0x0F) | ADC12VRSEL_1;    // VR+=Vref(1.2V), VR-=AVss
-  ADC12CTL0 |= ADC12ENC | ADC12SC;              // start
-  adc_wait_done();
-  return ADC12MEM0;
+// Convert trip current (1.5× I_MAX) to 12-bit ADC codes
+static inline uint16_t oc_trip_counts(void) {
+    const float itrip   = 1.5f * I_MAX_A;
+    const float v_sense = itrip * RSENSE_OHMS * SENSE_GAIN;
+    float codes = (v_sense / VREF_VOLTS) * 4095.0f;
+    if (codes < 0.0f)   codes = 0.0f;
+    if (codes > 4095.0f) codes = 4095.0f;
+    return (uint16_t)(codes + 0.5f);
 }
 
-/* --- public API --- */
-void OC_Config(uint16_t trip_counts, uint16_t trip_ms, uint16_t clear_ms){
-  TRIP_COUNTS = trip_counts ? trip_counts : TRIP_COUNTS;
-  TRIP_MS     = trip_ms     ? trip_ms     : TRIP_MS;
-  CLEAR_MS    = clear_ms    ? clear_ms    : CLEAR_MS;
-}
-void OC_SetCallbacks(void (*cut)(void), void (*resume)(void)){ cut_cb = cut; resume_cb = resume; }
+void adc12_init(void) {
+    // --- Make sure P1.0 is configured as output for the fault LED ---
+    P1DIR |= BIT0;
+    P1OUT &= ~BIT0;
 
-void OC_Init_A4A5(void){
-  /* Route P8.7 (A4) & P8.6 (A5) to analog */
-  P8SEL1 |= (BIT7 | BIT6);
-  P8SEL0 |= (BIT7 | BIT6);
+    // --- Select analog function on P8.6 and P8.7 ---
+    // FR6989 map: P8.6=A19, P8.7=A20
+    P8SEL1 |= BIT6 | BIT7;
+    P8SEL0 |= BIT6 | BIT7;
 
-  /* Internal 1.2 V reference on */
-  PMMCTL0_H = PMMPW_H;
-  REFCTL0   = REFON | REFVSEL_0;
-  __delay_cycles(40000);
+    // --- Turn on 2.5 V internal reference ---
+    REFCTL0 |= REFVSEL_2 | REFON;                  // 2.5 V
+    while (REFCTL0 & REFGENBUSY) { __no_operation(); }
+    __delay_cycles(8000);                          // ~1 ms @ 8 MHz for reference to settle
 
-  /* ADC12_B basic single-channel config (we’ll switch INCH in software) */
-  ADC12CTL0 = ADC12SHT0_2 | ADC12ON;     // 16 cyc sample, ADC on
-  ADC12CTL1 = ADC12SHP;                  // sampling timer
-  ADC12CTL2 = ADC12RES_2;                // 12-bit
+    // --- ADC12_B setup: 12-bit, sample timer, repeated sequence of channels (A19->A20) ---
+    ADC12CTL0 = ADC12SHT0_2 | ADC12ON;             // 16 ADC clocks sample, ADC on
+    ADC12CTL1 = ADC12SHP       |                   // sample-and-hold pulse mode (timer)
+                ADC12SSEL_3    |                   // SMCLK source
+                ADC12DIV_3     |                   // SMCLK/4 for ADC clock
+                ADC12CONSEQ_3;                     // repeated sequence of channels
+    ADC12CTL2 = ADC12RES_2;                        // 12-bit
 
-  state = ST_NORMAL;
-  over_ms = btn_ms = 0;
-  adcA = adcB = 0;
-}
+    // MEM0: A19 (P8.6), VRSEL=internal 2.5 V
+    ADC12MCTL0 = ADC12VRSEL_1 | ADC12INCH_19;
 
-void OC_1msTask(bool clear_button_pressed){
-  /* Sample A4 then A5 (blocking). Each conversion ~20–30 µs at typical clocks. */
-  adcA = adc_read_inch(4);   // A4 (P8.7)
-  adcB = adc_read_inch(5);   // A5 (P8.6)
-  bool over_now = (adcA > TRIP_COUNTS) || (adcB > TRIP_COUNTS);
+    // MEM1: A20 (P8.7), VRSEL=internal 2.5 V, mark end of sequence
+    ADC12MCTL1 = ADC12VRSEL_1 | ADC12INCH_20 | ADC12EOS;
 
-  switch(state){
-    case ST_NORMAL:
-      if (over_now){ over_ms = 1; state = ST_OVER; }
-      break;
+    // Enable interrupts for both memory locations
+    ADC12IER0 = ADC12IE0 | ADC12IE1;
 
-    case ST_OVER:
-      if (!over_now){ over_ms = 0; state = ST_NORMAL; }
-      else if (++over_ms >= TRIP_MS){
-        if (cut_cb) cut_cb();  // cut PWM
-        state = ST_FAULT;
-        btn_ms = 0;
-      }
-      break;
+    // Precompute threshold once (shared for both channels here)
+    (void)oc_trip_counts();
 
-    case ST_FAULT:
-      btn_ms = clear_button_pressed ? (btn_ms < 0xFFFF ? btn_ms + 1 : btn_ms) : 0;
-      if (btn_ms >= CLEAR_MS){
-        if (resume_cb) resume_cb();   // restore PWM
-        btn_ms = over_ms = 0;
-        state = ST_NORMAL;
-      }
-      break;
-  }
+    // Enable and start conversions (continuous)
+    ADC12CTL0 |= ADC12ENC;
+    ADC12CTL0 |= ADC12SC;
 }
 
-bool     OC_IsFault(void){ return state == ST_FAULT; }
-uint16_t OC_LatestAdcA(void){ return adcA; }
-uint16_t OC_LatestAdcB(void){ return adcB; }
+// === ADC12 ISR: trip if either channel exceeds threshold ===
+#pragma vector=ADC12_B_VECTOR
+__interrupt void ADC12_B_ISR(void) {
+    switch (__even_in_range(ADC12IV, ADC12IV_ADC12RDYIFG)) {
+    case ADC12IV_ADC12IFG0: { // MEM0 (P8.6 / A19)
+        if (!overcurrent_fault) {
+            uint16_t s0 = ADC12MEM0;
+            if (s0 >= oc_trip_counts()) {
+                overcurrent_fault = 1;
+                pwm_enable(false);        // kill PWM immediately
+                P1OUT |= BIT0;            // fault LED on
+                ADC12CTL0 &= ~(ADC12ENC | ADC12SC); // stop conversions (optional)
+            }
+        }
+    } break;
+
+    case ADC12IV_ADC12IFG1: { // MEM1 (P8.7 / A20)
+        if (!overcurrent_fault) {
+            uint16_t s1 = ADC12MEM1;
+            if (s1 >= oc_trip_counts()) {
+                overcurrent_fault = 1;
+                pwm_enable(false);
+                P1OUT |= BIT0;
+                ADC12CTL0 &= ~(ADC12ENC | ADC12SC);
+            }
+        }
+    } break;
+
+    default:
+        break;
+    }
+
+    // Wake the main loop in case it's sleeping in LPM0
+    __bic_SR_register_on_exit(LPM0_bits);
+}
