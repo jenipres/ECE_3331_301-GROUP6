@@ -4,26 +4,23 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ===================== User Config ===================== */
-#define F_CPU_HZ              8000000UL   /* DCO 8 MHz */
-#define PWM_FREQ_HZ           19000UL     /* ~20 kHz PWM */
-#define SYSTICK_HZ            1000UL      /* 1 kHz system tick */
-#define OC_WINDOW_MS          50          /* overcurrent window: trip if >thr for >= this ms */
-#define CLEAR_HOLD_MS         1000        /* button hold to clear fault */
-#define DEMO_FORWARD_MS       820       /* ~1 ft forward (tune) */
-#define DEMO_TURN_MS          1000         /* ~90° turn (tune) */
+#define F_CPU_HZ              8000000UL   // DCO 8 MHz 
+#define PWM_FREQ_HZ           19000UL     // ~20 kHz PWM 
+#define SYSTICK_HZ            1000UL      // 1 kHz system tick 
+#define OC_WINDOW_MS          50          // overcurrent window: trip if >thr for >= this ms 
+#define CLEAR_HOLD_MS         1000        // button hold to clear fault 
+#define DEMO_FORWARD_MS       820       // ~1 ft forward (tune) 
+#define DEMO_TURN_MS          1000         // ~90° turn (tune) 
 #define DEMO_IDLE_MS          200
  
 
-/* Overcurrent thresholds (12-bit ADC counts, 0..4095). 
-   Set after measuring motor currents. */
+//OC Threshold
 #define ADC_THRESH_A          507//506.9999999999999699
 #define ADC_THRESH_B          507//506.9999999999999699
 
-/* ===================== Derived ===================== */
-#define PWM_TICKS             (F_CPU_HZ / PWM_FREQ_HZ)     /* e.g., 8e6/20e3=400 */
+#define PWM_TICKS             (F_CPU_HZ / PWM_FREQ_HZ)     //tick rate, used for duty cycle
 
-/* ===================== State & Globals ===================== */
+//state defs
 typedef enum { SYS_OK=0, SYS_FAULT=1 } sys_state_t;
 static volatile sys_state_t sys_state = SYS_OK;
 static volatile uint16_t oc_ticks_A = 0, oc_ticks_B = 0;
@@ -45,27 +42,28 @@ typedef enum {
 static volatile demo_state_t demo_state = DEMO_FWD;
 static volatile uint16_t demo_timer_ms = 0;
 
-/* ===================== Small Helpers ===================== */
-static inline void dir_A_forward(void){  /* IN1=P1.3 high, IN2=P3.0 low */
+//helpers
+static inline void dir_A_forward(void){  // IN1=P1.3 high, IN2=P3.0 low 
     P1OUT |= BIT3;
     P3OUT &= ~BIT0;
 }
-/*static inline void dir_A_reverse(void){   IN1=low, IN2=high 
+/*Not needed-------
+static inline void dir_A_reverse(void){   IN1=low, IN2=high 
     P1OUT &= ~BIT3;
     P3OUT |= BIT0;
 }*/
-static inline void dir_B_forward(void){  /* IN3=P3.1 high, IN4=P2.3 low */
+static inline void dir_B_forward(void){  // IN3=P3.1 high, IN4=P2.3 low 
     P3OUT |= BIT1;
     P2OUT &= ~BIT3;
 }
-static inline void dir_B_reverse(void){  /* IN3=low, IN4=high */
+static inline void dir_B_reverse(void){  // IN3=low, IN4=high 
     P3OUT &= ~BIT1;
     P2OUT |= BIT3;
 }
 
 static inline void pwm_apply(void){
-    TA1CCR1 = dutyA;  /* TA1.1 -> P3.3 */
-    TB0CCR2 = dutyB;  /* TB0.2 -> P3.6 */
+    TA1CCR1 = dutyA;  // TA1.1 -P3.3 
+    TB0CCR2 = dutyB;  // TB0.2 -P3.6 
 }
 
 static inline void pwm_enable(bool en){
@@ -75,7 +73,7 @@ static inline void pwm_enable(bool en){
     } else {
         TA1CCTL1 = OUTMOD_0;
         TB0CCTL2 = OUTMOD_0;
-        P3OUT &= ~(BIT3 | BIT6); /* force ENA/ENB low */
+        P3OUT &= ~(BIT3 | BIT6); // force ENA/ENB low
     }
 }
 
@@ -87,7 +85,7 @@ static uint16_t adc12_read(uint8_t mctl_inch) {
     return ADC12MEM0;                  // return result
 }
 
-/* ===================== Init ===================== */
+//Initiate clock and gpios
 static void clock_init_8MHz(void){
     CSCTL0_H = CSKEY_H;
     CSCTL1 = DCOFSEL_6;
@@ -117,7 +115,7 @@ static void gpio_init(void){
     P3SEL1 |= (BIT3 | BIT6);
     P3SEL0 &= ~(BIT3 | BIT6);
 
-    /* ADC analog pins: P1.6=A6, P1.7=A7 */
+    // ADC analog pins: P8.6=A5, P8.7=A4
     P8SEL0 |= BIT6 | BIT7;   // select peripheral function
     P8SEL1 &= ~(BIT6 | BIT7); // make sure it's primary (not secondary/tertiary)
 
@@ -148,7 +146,7 @@ static void adc12_init(void){
     ADC12CTL2 = ADC12RES_2;
 }
 
-/* ===================== Fault Handling ===================== */
+// Fault functions
 static void enter_fault(void){
     if (sys_state == SYS_FAULT) return;
     sys_state = SYS_FAULT;
@@ -164,8 +162,7 @@ static void clear_fault(void){
     P1OUT &= ~BIT0;
     pwm_enable(true);
 }
-
-/* ===================== Speed Helpers ===================== */
+//Speed control functions
 void set_speed_A_percent(uint8_t pct){
     if (pct > 100) pct = 100;
     dutyA = (uint16_t)((uint32_t)PWM_TICKS * pct / 100U);
@@ -177,7 +174,7 @@ void set_speed_B_percent(uint8_t pct){
     pwm_apply();
 }
 
-/* ===================== Demo ===================== */
+// DEMO---------------------
 static void demo_step_ok(void){
     switch(demo_state){
     case DEMO_FWD:
@@ -221,7 +218,7 @@ static void demo_step_ok(void){
 }
 
 
-/* ===================== Main ===================== */
+// Main----------------------
 int main(void){
     WDTCTL = WDTPW | WDTHOLD;
     PM5CTL0 &= ~LOCKLPM5;
@@ -230,7 +227,6 @@ int main(void){
     clock_init_8MHz();
     gpio_init();
     adc12_init();
-    //OC_Init_A4A5();
     timer_pwm_init();
     timer_systick_init();
 
@@ -247,14 +243,14 @@ int main(void){
     }
 }
 
-/* ===================== SysTick ISR ===================== */
+//Fault detection and state control
 void __attribute__((interrupt(TIMER0_A0_VECTOR))) TIMER0_A0_ISR(void)
 {
-    uint16_t iA = adc12_read(ADC12INCH_6); /* P1.6 */
-    uint16_t iB = adc12_read(ADC12INCH_7); /* P1.7 */
+    uint16_t iA = adc12_read(ADC12INCH_6); // P8.6- reads analog signal
+    uint16_t iB = adc12_read(ADC12INCH_7); // P8.7- reads analog signal
 
     oc_ticks_A = (iA > ADC_THRESH_A) ? (oc_ticks_A + 1) : 0;
-    oc_ticks_B = (iB > ADC_THRESH_B) ? (oc_ticks_B + 1) : 0;
+    oc_ticks_B = (iB > ADC_THRESH_B) ? (oc_ticks_B + 1) : 0;//checks if current is above threshold, increments if so
 
     if (sys_state == SYS_OK){
         if (oc_ticks_A >= OC_WINDOW_MS || oc_ticks_B >= OC_WINDOW_MS){
@@ -284,5 +280,4 @@ void __attribute__((interrupt(TIMER0_A0_VECTOR))) TIMER0_A0_ISR(void)
 
     __bic_SR_register_on_exit(LPM0_bits);
 }
-
 
