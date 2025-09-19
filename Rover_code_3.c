@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ===================== User Config ===================== */
+/* ===================== Config ===================== */
 #define F_CPU_HZ              8000000UL   /* DCO 8 MHz */
 #define PWM_FREQ_HZ           20000UL     /* ~20 kHz PWM */
 #define SYSTICK_HZ            1000UL      /* 1 kHz system tick */
