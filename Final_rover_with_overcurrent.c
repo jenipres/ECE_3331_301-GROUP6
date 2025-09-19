@@ -252,14 +252,15 @@ void __attribute__((interrupt(TIMER0_A0_VECTOR))) TIMER0_A0_ISR(void)
     oc_ticks_A = (iA > ADC_THRESH_A) ? (oc_ticks_A + 1) : 0;
     oc_ticks_B = (iB > ADC_THRESH_B) ? (oc_ticks_B + 1) : 0;//checks if current is above threshold, increments if so
 
-    if (sys_state == SYS_OK){
-        if (oc_ticks_A >= OC_WINDOW_MS || oc_ticks_B >= OC_WINDOW_MS){
+    if (sys_state == SYS_OK)//ensures system state is okay
+    {
+        if (oc_ticks_A >= OC_WINDOW_MS || oc_ticks_B >= OC_WINDOW_MS){// checks if overcurrent was sustained longer than 50 ms
             enter_fault();
         } else {
             demo_step_ok();
         }
     } else {
-        bool btn_down = ((P1IN & BIT1) == 0);
+        bool btn_down = ((P1IN & BIT1) == 0);// clears fault if button P1.1 pressed
         if (btn_down){
             if (clear_hold_ms < (CLEAR_HOLD_MS + 200)) clear_hold_ms++;
             if (clear_hold_ms >= CLEAR_HOLD_MS){
