@@ -17,11 +17,11 @@
  *   IR_PORT_DIR / IR_PORT_OUT    -> PxDIR / PxOUT register
  *   IR_PIN                       -> BITn for chosen pin (e.g., BIT2)
  */
-#define IR_PORT_SEL0   P1SEL0
-#define IR_PORT_SEL1   P1SEL1
-#define IR_PORT_DIR    P1DIR
-#define IR_PORT_OUT    P1OUT
-#define IR_PIN         BIT2      // P1.2 by default; change if necessary
+#define IR_PORT_SEL0   P3SEL0
+#define IR_PORT_SEL1   P3SEL1
+#define IR_PORT_DIR    P3DIR
+#define IR_PORT_OUT    P3OUT
+#define IR_PIN         BIT3      // P1.2 by default; change if necessary
 
 // ---------- Carrier frequency parameters ----------
 #define SMCLK_FREQ     1000000UL   // 1 MHz
@@ -82,12 +82,12 @@ void init_carrier_timer(void) {
     // TA0CCR0 = CARRIER_TOP
     // TA0CCR1 = 50% duty
     // TA0CCTL1 = OUTMOD_7 (reset/set) or OUTMOD_6 depending on preference; OUTMOD_7 is common.
-    TA0CCR0 = (uint16_t)CARRIER_TOP;
-    TA0CCR1 = (uint16_t)((CARRIER_TOP + 1) / 2);  // roughly 50% duty
-    TA0CCTL1 = OUTMOD_7;   // Reset/Set output mode
+    TA1CCR0 = (uint16_t)CARRIER_TOP;
+    TA1CCR1 = (uint16_t)((CARRIER_TOP + 1) / 2);  // roughly 50% duty
+    TA1CCTL1 = OUTMOD_7;   // Reset/Set output mode
 
     // Keep timer running in Up mode (counts 0..CCR0). We can keep it running always.
-    TA0CTL = TASSEL__SMCLK | MC__UP | TACLR; // SMCLK, up mode, clear TAR
+    TA1CTL = TASSEL__SMCLK | MC__UP | TACLR; // SMCLK, up mode, clear TAR
 }
 
 // ---------- NEC send primitives ----------
@@ -140,10 +140,12 @@ void setup_clock_to_1MHz(void) {
     // FRxx style CS registers. If your MSP430 variant differs, use the appropriate clock init.
     // Unlock CS registers
 #ifdef CSKEY
+
+    PM5CTL0 &= ~LOCKLPM5;
     CSCTL0_H = CSKEY >> 8;
     CSCTL1 = DCOFSEL_0; // DCO = ~1 MHz
     CSCTL2 = SELM__DCOCLK | SELS__DCOCLK | SELA__VLOCLK; // MCLK=SMCLK=DCO, ACLK=VLO
-    CSCTL3 = DIVM__1 | DIVS__1;
+    CSCTL3 = DIVM__1 | DIVS__1 | DIVA__1;
     CSCTL0_H = 0; // lock
 #else
     // If CS registers not present on your device, you can set DCO via other means or rely on default ~1MHz DCO.
@@ -162,27 +164,27 @@ int main(void) {
     carrier_init_gpio_off();
 
     // Example buttons on P1.1..P1.4 (change to match your hardware)
-    P1DIR &= ~(BIT1 | BIT2 | BIT3 | BIT4);    // inputs
-    P1OUT |=  (BIT1 | BIT2 | BIT3 | BIT4);    // pull-ups
-    P1REN |=  (BIT1 | BIT2 | BIT3 | BIT4);
+    P2DIR &= ~(BIT4 | BIT5 | BIT6 | BIT7);    // inputs
+    P2OUT |=  (BIT4 | BIT5 | BIT6 | BIT7);    // pull-ups
+    P2REN |=  (BIT4 | BIT5 | BIT6 | BIT7);
 
     // Simple debounce/backoff variables
     for (;;) {
         // Simple polling of buttons; in a real remote you'd use interrupts + debouncing
-        if (!(P1IN & BIT1)) {   // button pressed (active low)
+        if (!(P2IN & BIT4)) {   // button pressed (active low)
             // Example: send "forward" -> addr 0x00, cmd 0x10 (choose your codes)
             send_nec(0x00, 0x10);
             __delay_cycles(200000); // small delay between repeats (200 ms)
         }
-        else if (!(P1IN & BIT2)) {
+        else if (!(P2IN & BIT5)) {
             send_nec(0x00, 0x11);  // e.g., backward
             __delay_cycles(200000);
         }
-        else if (!(P1IN & BIT3)) {
+        else if (!(P2IN & BIT6)) {
             send_nec(0x00, 0x12);  // left
             __delay_cycles(200000);
         }
-        else if (!(P1IN & BIT4)) {
+        else if (!(P2IN & BIT7)) {
             send_nec(0x00, 0x13);  // right
             __delay_cycles(200000);
         }
