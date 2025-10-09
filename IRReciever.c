@@ -106,19 +106,19 @@ int main(void) {
             ir_ready = 0;
 
             // map to rover controls
-            if (cmd == 0xA90) {//match to emitter
+            if (cmd == 0x10) {//match to emitter
                 dir_A_forward();
                 dir_B_forward();
             }
-            else if (cmd == 0x690) {//match to emitter
+            else if (cmd == 0x11) {//match to emitter
                 dir_A_backward();
                 dir_B_backward();
             }
-            else if (cmd == 0xE90) {//match to emitter
+            else if (cmd == 0x12) {//match to emitter
                 dir_A_forward();
                 dir_B_backward();
             }
-            else if (cmd == 0x190) {//match to emitter
+            else if (cmd == 0x12) {//match to emitter
                 dir_B_forward();
                 dir_A_backward();
             }
