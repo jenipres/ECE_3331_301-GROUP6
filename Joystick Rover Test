@@ -4,19 +4,28 @@
 #include <stdbool.h>
 
 #define F_CPU_HZ         8000000UL   // 8 MHz DCO
-#define PWM_FREQ_HZ      5000UL     // ~20 kHz PWM
+#define PWM_FREQ_HZ      10000UL     // 10 kHz PWM
 #define SYSTICK_HZ       1000UL      // 1 kHz control update
 #define PWM_TICKS        (F_CPU_HZ / PWM_FREQ_HZ)
 
-// Joystick channels (A7, A8 = P8.4, P8.5)
+/* --- Overcurrent protection --- */
+#define OC_WINDOW_MS     50          // must exceed threshold for >= this many ms
+#define CLEAR_HOLD_MS    1000        // hold button to clear fault (P1.1)
+#define ADC_THRESH_A     507         // tune to your shunt scaling
+#define ADC_THRESH_B     507
+
+/* --- Joystick (A7 = P8.4, A8 = P8.5) --- */
 #define JOY_X_CH         ADC12INCH_7
 #define JOY_Y_CH         ADC12INCH_8
+#define JOY_DEADZONE_PCT 8
+#define MIX_TURN_GAIN    1.0f
+#define MIN_RUN_PCT      5
 
-#define JOY_DEADZONE_PCT 8           // wider deadzone to stop creep
-#define MIX_TURN_GAIN    1.0f        // steering gain
-#define MIN_RUN_PCT      5           // below this, force 0% duty
+/* --- Current sense (adjust if your wiring differs) --- */
+#define CURR_A_CH        ADC12INCH_5   // P8.6 -> A5
+#define CURR_B_CH        ADC12INCH_4   // P8.7 -> A4
 
-// --- L298 pins ---
+/* --- L298 pins --- */
 #define IN1_PORT P1OUT
 #define IN1_DIR  P1DIR
 #define IN1_BIT  BIT3
@@ -33,16 +42,21 @@
 #define IN4_DIR  P2DIR
 #define IN4_BIT  BIT3
 
-// Globals for PWM duty (start at 0)
+/* --- Globals --- */
+typedef enum { SYS_OK=0, SYS_FAULT=1 } sys_state_t;
+static volatile sys_state_t sys_state = SYS_OK;
+
 static volatile uint16_t dutyA = 0;
 static volatile uint16_t dutyB = 0;
 
-// Joystick centers measured at boot
+static volatile uint16_t oc_ticks_A = 0, oc_ticks_B = 0;
+static volatile uint16_t clear_hold_ms = 0;
+
 static uint16_t joy_x_center = 2048;
 static uint16_t joy_y_center = 2048;
 
-/* ================== Basic hardware init ================== */
-static void clock_init_8MHz(void) {
+/* ================== HW init ================== */
+static void clock_init_8MHz(void){
     CSCTL0_H = CSKEY_H;
     CSCTL1   = DCOFSEL_6;                         // 8 MHz
     CSCTL2   = SELM__DCOCLK | SELS__DCOCLK | SELA__VLOCLK;
@@ -50,9 +64,10 @@ static void clock_init_8MHz(void) {
     CSCTL0_H = 0;
 }
 
-static void gpio_init(void) {
-    // LED (heartbeat)
-    P1DIR |= BIT0; P1OUT &= ~BIT0;
+static void gpio_init(void){
+    // LED heartbeat + clear button
+    P1DIR |= BIT0;         P1OUT &= ~BIT0;       // LED
+    P1DIR &= ~BIT1;        P1REN |= BIT1; P1OUT |= BIT1;  // button with pull-up
 
     // L298 direction pins
     IN1_DIR |= IN1_BIT; IN1_PORT &= ~IN1_BIT;
@@ -65,12 +80,12 @@ static void gpio_init(void) {
     P3SEL1 |= (BIT3 | BIT6);
     P3SEL0 &= ~(BIT3 | BIT6);
 
-    // Joystick analog: P8.4=A7, P8.5=A8
-    P8SEL0 |= (BIT4 | BIT5);
-    P8SEL1 &= ~(BIT4 | BIT5);
+    // Analog pins on P8: A7/A8 joystick, A5/A4 current
+    P8SEL0 |= (BIT4 | BIT5 | BIT6 | BIT7);
+    P8SEL1 &= ~(BIT4 | BIT5 | BIT6 | BIT7);
 }
 
-static void timer_pwm_init(void) {
+static void timer_pwm_init(void){
     TA1CCR0  = PWM_TICKS - 1;
     TA1CCR1  = 0;
     TA1CCTL1 = OUTMOD_7;
@@ -82,20 +97,20 @@ static void timer_pwm_init(void) {
     TB0CTL   = TBSSEL__SMCLK | MC__UP | TBCLR;
 }
 
-static void timer_systick_init(void) {
+static void timer_systick_init(void){
     TA0CCR0  = (F_CPU_HZ / SYSTICK_HZ) - 1;
     TA0CCTL0 = CCIE;
     TA0CTL   = TASSEL__SMCLK | MC__UP | TACLR;
 }
 
-static void adc12_init(void) {
-    ADC12CTL0 = ADC12SHT0_2 | ADC12ON;
-    ADC12CTL1 = ADC12SHP;
-    ADC12CTL2 = ADC12RES_2; // 12-bit
+static void adc12_init(void){
+    ADC12CTL0 = ADC12SHT0_2 | ADC12ON; // 16 Cycles
+    ADC12CTL1 = ADC12SHP;              // sampling timer
+    ADC12CTL2 = ADC12RES_2;            // 12-bit
 }
 
 /* ================== Helpers ================== */
-static uint16_t adc12_read(uint8_t channel) {
+static uint16_t adc12_read(uint8_t channel){
     ADC12CTL0 &= ~ADC12ENC;
     ADC12MCTL0 = channel;
     ADC12CTL0 |= ADC12ENC | ADC12SC;
@@ -103,11 +118,10 @@ static uint16_t adc12_read(uint8_t channel) {
     return ADC12MEM0;
 }
 
-// C89-safe: declare loop var outside the for()
-static void joystick_calibrate_centers(void) {
+static void joystick_calibrate_centers(void){
     uint32_t sx = 0, sy = 0;
     int i;
-    for (i = 0; i < 128; i++) {
+    for (i = 0; i < 128; i++){
         sx += adc12_read(JOY_X_CH);
         sy += adc12_read(JOY_Y_CH);
         __delay_cycles(8000); // ~1 ms at 8 MHz
@@ -116,63 +130,87 @@ static void joystick_calibrate_centers(void) {
     joy_y_center = (uint16_t)(sy / 128U);
 }
 
-static int16_t map_to_pct(uint16_t adc, uint16_t center) {
+static int16_t map_to_pct(uint16_t adc, uint16_t center){
     int32_t centered = (int32_t)adc - (int32_t)center;
-    int32_t pct = (centered * 100) / 2048;   // -100..+100 approx
+    int32_t pct = (centered * 100) / 2048; // approx +/-100
     if (pct > 100)  pct = 100;
     if (pct < -100) pct = -100;
     if (pct > -JOY_DEADZONE_PCT && pct < JOY_DEADZONE_PCT) pct = 0;
     return (int16_t)pct;
 }
 
-// Motor direction helpers
+/* --- L298 helpers --- */
 static inline void dir_A_forward(void){ IN1_PORT |= IN1_BIT; IN2_PORT &= ~IN2_BIT; }
 static inline void dir_A_reverse(void){ IN1_PORT &= ~IN1_BIT; IN2_PORT |=  IN2_BIT; }
 static inline void dir_B_forward(void){ IN3_PORT |= IN3_BIT; IN4_PORT &= ~IN4_BIT; }
 static inline void dir_B_reverse(void){ IN3_PORT &= ~IN3_BIT; IN4_PORT |=  IN4_BIT; }
 
-static void set_speed_A_percent(uint8_t pct) {
+static inline void pwm_enable(bool en){
+    if (en){
+        TA1CCTL1 = OUTMOD_7;
+        TB0CCTL2 = OUTMOD_7;
+    } else {
+        TA1CCTL1 = OUTMOD_0;
+        TB0CCTL2 = OUTMOD_0;
+        P3OUT &= ~(BIT3 | BIT6); // ENA/ENB low
+    }
+}
+
+static void set_speed_A_percent(uint8_t pct){
     if (pct < MIN_RUN_PCT) pct = 0;
     if (pct > 100) pct = 100;
     dutyA = (uint16_t)((uint32_t)PWM_TICKS * (uint32_t)pct / 100U);
     TA1CCR1 = dutyA;
-    if (pct == 0) { IN1_PORT &= ~IN1_BIT; IN2_PORT &= ~IN2_BIT; } // coast
+    if (pct == 0){ IN1_PORT &= ~IN1_BIT; IN2_PORT &= ~IN2_BIT; }
 }
-static void set_speed_B_percent(uint8_t pct) {
+static void set_speed_B_percent(uint8_t pct){
     if (pct < MIN_RUN_PCT) pct = 0;
     if (pct > 100) pct = 100;
     dutyB = (uint16_t)((uint32_t)PWM_TICKS * (uint32_t)pct / 100U);
     TB0CCR2 = dutyB;
-    if (pct == 0) { IN3_PORT &= ~IN3_BIT; IN4_PORT &= ~IN4_BIT; }
+    if (pct == 0){ IN3_PORT &= ~IN3_BIT; IN4_PORT &= ~IN4_BIT; }
 }
-
 static void motorA_signed(int16_t pct){
-    if (pct > 0)      { dir_A_forward(); set_speed_A_percent((uint8_t)pct); }
-    else if (pct < 0) { dir_A_reverse(); set_speed_A_percent((uint8_t)(-pct)); }
-    else              { set_speed_A_percent(0); }
+    if (pct > 0){ dir_A_forward(); set_speed_A_percent((uint8_t)pct); }
+    else if (pct < 0){ dir_A_reverse(); set_speed_A_percent((uint8_t)(-pct)); }
+    else { set_speed_A_percent(0); }
 }
 static void motorB_signed(int16_t pct){
-    if (pct > 0)      { dir_B_forward(); set_speed_B_percent((uint8_t)pct); }
-    else if (pct < 0) { dir_B_reverse(); set_speed_B_percent((uint8_t)(-pct)); }
-    else              { set_speed_B_percent(0); }
+    if (pct > 0){ dir_B_forward(); set_speed_B_percent((uint8_t)pct); }
+    else if (pct < 0){ dir_B_reverse(); set_speed_B_percent((uint8_t)(-pct)); }
+    else { set_speed_B_percent(0); }
 }
 
-/* ================== Joystick processing ================== */
-static void joystick_step(void) {
+/* --- Fault handling --- */
+static inline void enter_fault(void){
+    if (sys_state == SYS_FAULT) return;
+    sys_state = SYS_FAULT;
+    pwm_enable(false);
+    P1OUT |= BIT0; // LED on solid
+}
+static inline void clear_fault(void){
+    sys_state = SYS_OK;
+    oc_ticks_A = oc_ticks_B = 0;
+    clear_hold_ms = 0;
+    P1OUT &= ~BIT0;
+    pwm_enable(true);
+}
+
+/* ================== Control paths ================== */
+static void joystick_step_ok(void){
     uint16_t x_raw = adc12_read(JOY_X_CH);
     uint16_t y_raw = adc12_read(JOY_Y_CH);
 
     int16_t x = map_to_pct(x_raw, joy_x_center);
     int16_t y = map_to_pct(y_raw, joy_y_center);
 
-    // Differential mix
     float k = MIX_TURN_GAIN;
     float left_f  = (float)y - k * (float)x;
     float right_f = (float)y + k * (float)x;
 
-    if (left_f  > 100.0f)  left_f  = 100.0f;
-    if (left_f  < -100.0f) left_f  = -100.0f;
-    if (right_f > 100.0f)  right_f = 100.0f;
+    if (left_f > 100.0f) left_f = 100.0f;
+    if (left_f < -100.0f) left_f = -100.0f;
+    if (right_f > 100.0f) right_f = 100.0f;
     if (right_f < -100.0f) right_f = -100.0f;
 
     motorA_signed((int16_t)left_f);
@@ -180,36 +218,61 @@ static void joystick_step(void) {
 }
 
 /* ================== main ================== */
-int main(void) {
-    WDTCTL   = WDTPW | WDTHOLD;
+int main(void){
+    WDTCTL = WDTPW | WDTHOLD;
     PM5CTL0 &= ~LOCKLPM5;
 
     clock_init_8MHz();
     gpio_init();
     adc12_init();
 
-    // Center the joystick and don't touch it for ~0.1 s
+    // leave stick centered for ~0.1 s
     joystick_calibrate_centers();
 
     timer_pwm_init();
     timer_systick_init();
 
+    pwm_enable(true);
     __enable_interrupt();
 
-    while (1) {
+    while (1){
         __bis_SR_register(LPM0_bits | GIE);
         __no_operation();
     }
 }
 
-/* ================== 1 kHz control ISR ================== */
-void __attribute__((interrupt(TIMER0_A0_VECTOR))) TIMER0_A0_ISR(void) {
-    joystick_step();
+/* ================== 1 kHz system tick ISR ================== */
+void __attribute__((interrupt(TIMER0_A0_VECTOR))) TIMER0_A0_ISR(void)
+{
+    /* sample currents */
+    uint16_t iA = adc12_read(CURR_A_CH);
+    uint16_t iB = adc12_read(CURR_B_CH);
 
-    // heartbeat ~4 Hz
+    oc_ticks_A = (iA > ADC_THRESH_A) ? (uint16_t)(oc_ticks_A + 1U) : 0U;
+    oc_ticks_B = (iB > ADC_THRESH_B) ? (uint16_t)(oc_ticks_B + 1U) : 0U;
+
+    if (sys_state == SYS_OK){
+        if (oc_ticks_A >= OC_WINDOW_MS || oc_ticks_B >= OC_WINDOW_MS){
+            enter_fault();
+        } else {
+            joystick_step_ok();
+        }
+    } else {
+        /* hold P1.1 low for CLEAR_HOLD_MS to clear fault */
+        if ((P1IN & BIT1) == 0){
+            if (clear_hold_ms < (CLEAR_HOLD_MS + 200U)) clear_hold_ms++;
+            if (clear_hold_ms >= CLEAR_HOLD_MS) clear_fault();
+        } else {
+            clear_hold_ms = 0;
+        }
+    }
+
+    /* heartbeat when OK: ~4 Hz blink */
     static uint16_t hb = 0;
-    hb++;
-    if (hb >= 250U) { hb = 0U; P1OUT ^= BIT0; }
+    if (sys_state == SYS_OK){
+        hb++;
+        if (hb >= 250U){ hb = 0U; P1OUT ^= BIT0; }
+    }
 
     __bic_SR_register_on_exit(LPM0_bits);
 }
