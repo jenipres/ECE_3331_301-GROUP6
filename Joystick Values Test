@@ -1,0 +1,87 @@
+#include <msp430.h>
+#include <stdio.h>
+
+volatile unsigned int xVal = 0;
+volatile unsigned int yVal = 0;
+volatile unsigned char switchState = 1;
+
+// Simple UART transmit
+void uart_putc(char c) {
+    while (!(UCA0IFG & UCTXIFG)); // wait for TX buffer
+    UCA0TXBUF = c;
+}
+
+void uart_puts(char *s) {
+    while (*s) uart_putc(*s++);
+}
+
+// Initialize UART at 9600 baud (assuming 8 MHz SMCLK)
+void uart_init(void) {
+    P2SEL1 |= BIT0 | BIT1;   // P2.0 = UCA0RXD, P2.1 = UCA0TXD
+    P2SEL0 &= ~(BIT0 | BIT1);
+    UCA0CTLW0 = UCSWRST;     // put eUSCI in reset
+    UCA0CTLW0 |= UCSSEL__SMCLK;   // SMCLK
+    UCA0BRW = 52;            // 8 MHz / 9600 = 833.3
+    UCA0MCTLW = UCOS16 | UCBRF_1 | 0x4900; // modulation
+    UCA0CTLW0 &= ~UCSWRST;   // release for operation
+}
+
+// Initialize ADC for A0 (P1.0) and A1 (P1.1)
+void adc_init(void) {
+    // Configure pins
+    P1SEL1 |= BIT0 | BIT1;
+    P1SEL0 |= BIT0 | BIT1;
+
+    ADC12CTL0 = ADC12SHT0_2 | ADC12ON;  // 16 ADC12CLKs, turn ADC on
+    ADC12CTL1 = ADC12SHP;               // use sampling timer
+    ADC12CTL2 = ADC12RES_2;             // 12-bit resolution
+    ADC12MCTL0 = ADC12INCH_0;           // MEM0 -> A0
+    ADC12MCTL1 = ADC12INCH_1 | ADC12EOS; // MEM1 -> A1, end of sequence
+    ADC12CTL0 |= ADC12ENC;              // enable ADC
+}
+
+// Perform one ADC read of A0/A1
+void read_joystick(void) {
+    ADC12CTL0 |= ADC12SC;             // start conversion
+    while (ADC12CTL1 & ADC12BUSY);    // wait
+    xVal = ADC12MEM0;
+    yVal = ADC12MEM1;
+}
+
+// Initialize button on P2.3
+void button_init(void) {
+    P2DIR &= ~BIT3;     // input
+    P2REN |= BIT3;      // enable resistor
+    P2OUT |= BIT3;      // pull-up (active-low)
+}
+
+// Simple millisecond delay (~for 8 MHz CPU)
+void delay_ms(unsigned int ms) {
+    while (ms--) __delay_cycles(8000);
+}
+
+int main(void) {
+    WDTCTL = WDTPW | WDTHOLD;   // stop watchdog
+    CSCTL0_H = CSKEY_H;         // unlock CS
+    CSCTL1 = DCOFSEL_6;         // DCO = 8 MHz
+    CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
+    CSCTL3 = DIVA__1 | DIVS__1 | DIVM__1;
+    CSCTL0_H = 0;               // lock CS
+
+    uart_init();
+    adc_init();
+    button_init();
+
+    uart_puts("Joystick Monitor Started\r\n");
+
+    while (1) {
+        read_joystick();
+        switchState = (P2IN & BIT3) ? 1 : 0; // read button (active low)
+
+        char buffer[64];
+        sprintf(buffer, "X: %u | Y: %u | Switch: %u\r\n", xVal, yVal, switchState);
+        uart_puts(buffer);
+
+        delay_ms(100);
+    }
+}
