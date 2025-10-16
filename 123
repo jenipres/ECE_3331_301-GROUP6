@@ -1,0 +1,40 @@
+/* === IR Receiver Test ===
+ * Reads TSOP IR module on pin 2.
+ * Measures pulse lengths and classifies:
+ *   short  (~0.4 ms) → bit 0
+ *   long   (~0.8 ms) → bit 1
+ * Prints decoded bits in groups of 4 (nibble).
+ */
+
+const uint8_t RX_PIN = 2;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(RX_PIN, INPUT);
+  Serial.println("IR receiver ready...");
+}
+
+void loop() {
+  static uint8_t bitCount = 0;
+  static uint8_t nibble   = 0;
+
+  // Wait for active-low pulse
+  if (digitalRead(RX_PIN) == LOW) {
+    unsigned long tStart = micros();
+    while (digitalRead(RX_PIN) == LOW);
+    unsigned long dur = micros() - tStart;
+
+    // Classify bit by burst duration
+    uint8_t bitVal = (dur > 700) ? 1 : 0; // threshold ~0.7 ms
+    nibble = (nibble << 1) | bitVal;
+    bitCount++;
+
+    if (bitCount >= 4) {
+      Serial.print("Received nibble: ");
+      Serial.print(nibble, BIN);
+      Serial.println();
+      bitCount = 0;
+      nibble = 0;
+    }
+  }
+}
