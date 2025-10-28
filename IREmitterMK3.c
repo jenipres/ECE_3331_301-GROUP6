@@ -31,7 +31,7 @@ static void initCarrier(void)
     TB0CCR0  = (1000000UL / F_CARRIER) - 1;   // period @1MHz
     TB0CCR2  = TB0CCR0 / 3;                   // ~33% duty
     TB0CCTL2 = OUTMOD_7;                      // reset/set
-    TB0CTL   = TASSEL__SMCLK | MC__UP;        // up mode
+    TB0CTL   = TBSSEL__SMCLK | MC__UP;        // up mode
 }
 
 // cycles = number of carrier cycles
