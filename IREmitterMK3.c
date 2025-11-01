@@ -21,8 +21,8 @@ void main(void)
 
     // ===== Configure P2.7 for TB0.6 output =====
     P2DIR  |= BIT7;                 // P2.7 as output
-    P2SEL0 |= BIT7;                 // Select TB0.6 function
-    P2SEL1 &= ~BIT7;                // Primary module function (Timer_B)
+    P2SEL0 |= BIT7;                 // Select TB0.6 function- P2SEL0 is 1 is datasheet
+    P2SEL1 &= ~BIT7;                // Primary module function (Timer_B) - P2SEL1 is 0
 
 
      
