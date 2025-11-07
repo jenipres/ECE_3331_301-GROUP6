@@ -44,23 +44,21 @@ void main(void)
     while (1)
     {
         // Button pressed? (active low)
-        if (!(P3IN & BIT0))
+        while (!(P3IN & BIT0))
         {
-            P1OUT ^= BIT0;      // Toggle LED or perform action
-            __delay_cycles(200000); // Simple debounce delay
-            sendBurst(50);
+            sendBurst(20);
         }
-        else if (!(P3IN & BIT3))
+        while (!(P3IN & BIT3))
         {
-            sendBurst(200);
+            sendBurst(40);
         }
-        else if (!(P3IN & BIT6))
+        while (!(P3IN & BIT6))
         {
-            sendBurst(100);
+            sendBurst(60);
         }
-        else if (!(P3IN & BIT7))
+        while (!(P3IN & BIT7))
         {
-            sendBurst(150);
+            sendBurst(80);
         }
     }
 
@@ -74,7 +72,7 @@ static void delay_us(uint32_t us)
 static void sendBurst(uint16_t cycles)
 {
     uint32_t burst_us = cycles * CYCLE_US;
-    uint32_t gap_us   = (cycles > 70) ? burst_us * 4 : burst_us;
+    uint32_t gap_us   = (cycles) ? burst_us * 4 : burst_us * 3;
 
     TB0CCTL6 |= OUTMOD_7;                     // enable modulation
     delay_us(burst_us);               // 1 µs per cycle at 1MHz
