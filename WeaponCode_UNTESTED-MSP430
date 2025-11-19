@@ -1,0 +1,134 @@
+#include <msp430.h>
+#include <stdint.h>
+
+/* ----- User parameters (same idea as Arduino code) ----- */
+#define ESC_IDLE_US   1000u   // 1000 µs = idle / off
+#define RUN_US        1300u   // low-ish throttle for test
+#define RAMP_MS       2000u   // ramp time in ms
+#define RAMP_STEPS    50u     // ramp steps
+
+/* Timer / clock assumptions:
+ * - SMCLK = 1 MHz
+ * - Timer_A0 runs from SMCLK in UP mode
+ * - Period = 20 ms -> 20,000 timer counts at 1 MHz
+ */
+#define TIMER_CLK_HZ  1000000UL
+#define PWM_PERIOD_US 20000u  // 20 ms
+#define PWM_PERIOD_TICKS (PWM_PERIOD_US)  // 1 tick = 1 µs at 1 MHz
+
+/* Function prototypes */
+static void initClock(void);
+static void initPWM_ESC(void);
+static void delay_ms(unsigned long ms);
+static void setPulse_us(uint16_t us);
+static void rampTo_us(uint16_t targetUs,
+                      unsigned long durationMs,
+                      unsigned int steps);
+
+int main(void)
+{
+    /* Stop watchdog */
+    WDTCTL = WDTPW | WDTHOLD;
+
+    initClock();
+    initPWM_ESC();
+
+    /* ESC arming: hold at idle for 2 seconds */
+    setPulse_us(ESC_IDLE_US);
+    delay_ms(2000);
+
+    /* Ramp to RUN_US over RAMP_MS in RAMP_STEPS */
+    rampTo_us(RUN_US, RAMP_MS, RAMP_STEPS);
+
+    /* Hold at RUN_US forever */
+    setPulse_us(RUN_US);
+
+    while (1)
+    {
+        /* Just sit here; ESC keeps getting PWM from Timer_A */
+        delay_ms(1000);
+    }
+}
+
+/* ----- Clock setup: SMCLK = 1 MHz from DCO ----- */
+static void initClock(void)
+{
+    // Unlock CS registers
+    CSCTL0_H = CSKEY >> 8;
+
+    // DCO = ~1 MHz
+    CSCTL1 = DCOFSEL_0; // 1 MHz (see datasheet)
+
+    // ACLK = VLO, SMCLK = DCO, MCLK = DCO
+    CSCTL2 = SELA__VLOCLK | SELS__DCOCLK | SELM__DCOCLK;
+
+    // Dividers = 1
+    CSCTL3 = DIVA__1 | DIVS__1 | DIVM__1;
+
+    // Lock CS registers
+    CSCTL0_H = 0;
+
+    // On FRAM devices, unlock GPIO (they start in high-Z)
+    PM5CTL0 &= ~LOCKLPM5;
+}
+
+/* ----- Timer_A0 PWM init on P1.2 (TA0.1) ----- */
+static void initPWM_ESC(void)
+{
+    /* Configure P1.2 for TA0.1 output */
+    P1DIR  |= BIT2;      // P1.2 as output
+    P1SEL0 |= BIT2;      // Select primary module function
+    P1SEL1 &= ~BIT2;     // (TA0.1 on P1.2)
+
+    /* Configure Timer_A0 for 50 Hz PWM */
+    TA0CCR0  = PWM_PERIOD_TICKS - 1; // Period (20 ms @ 1 MHz)
+    TA0CCTL1 = OUTMOD_7;             // Reset/Set mode
+    TA0CCR1  = ESC_IDLE_US;          // Start at idle pulse (1 ms)
+
+    TA0CTL = TASSEL_2 |  // SMCLK
+             MC_1    |   // Up mode
+             TACLR;      // Clear timer
+}
+
+/* ----- Simple blocking delay (assumes 1 MHz MCLK) ----- */
+static void delay_ms(unsigned long ms)
+{
+    while (ms--)
+    {
+        __delay_cycles(1000);  // 1 ms at 1 MHz
+    }
+}
+
+/* ----- Set ESC pulse width in microseconds ----- */
+static void setPulse_us(uint16_t us)
+{
+    if (us < 500u)
+        us = 500u;     // safety clamp (optional)
+    if (us > 2500u)
+        us = 2500u;    // safety clamp (optional)
+
+    TA0CCR1 = us;      // 1 tick = 1 µs
+}
+
+/* ----- Ramp from ESC_IDLE_US to targetUs over durationMs ----- */
+static void rampTo_us(uint16_t targetUs,
+                      unsigned long durationMs,
+                      unsigned int steps)
+{
+    float start    = (float)ESC_IDLE_US;
+    float end      = (float)targetUs;
+    float stepVal  = (end - start) / (float)steps;
+    unsigned long stepDelayMs = durationMs / steps;
+
+    float cur = start;
+
+    for (unsigned int i = 0; i < steps; ++i)
+    {
+        cur += stepVal;
+        setPulse_us((uint16_t)cur);
+        delay_ms(stepDelayMs);
+    }
+
+    /* Ensure we end exactly at target */
+    setPulse_us(targetUs);
+}
