@@ -1,0 +1,49 @@
+#include <Servo.h>
+
+const uint8_t ESC_PIN      = 5;      // ESC signal to D5
+const uint16_t ESC_IDLE_US = 1000;   // idle / off
+const uint16_t RUN_US      = 1300;   // low-ish throttle for test
+const unsigned long RAMP_MS   = 2000;
+const unsigned int  RAMP_STEPS = 50;
+
+Servo esc;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) { ; }
+
+  Serial.println(F("40A ESC spin test (NiMH 9.6V) - REMOVE PROP!"));
+
+  esc.attach(ESC_PIN);
+
+  // stay at idle so ESC can arm
+  esc.writeMicroseconds(ESC_IDLE_US);
+  delay(2000);  // 2s is safe for most ESCs
+
+  // now ramp to a safe throttle
+  rampTo(RUN_US, RAMP_MS, RAMP_STEPS);
+
+  Serial.print(F("Holding at "));
+  Serial.print(RUN_US);
+  Serial.println(F(" us"));
+}
+
+void loop() {
+  // hold speed
+  delay(1000);
+}
+
+void rampTo(uint16_t targetUs, unsigned long durationMs, unsigned int steps) {
+  float start = (float)ESC_IDLE_US;
+  float end   = (float)targetUs;
+  float stepVal = (end - start) / (float)steps;
+  unsigned long stepDelay = durationMs / steps;
+
+  float cur = start;
+  for (unsigned int i = 0; i < steps; ++i) {
+    cur += stepVal;
+    esc.writeMicroseconds((uint16_t)cur);
+    delay(stepDelay);
+  }
+  esc.writeMicroseconds(targetUs);
+}
