@@ -3,6 +3,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define RUN_US                1300u   // low-ish throttle for test
+#define RAMP_MS               2000u   // ramp time in ms
+#define RAMP_STEPS            50u 
+#define ESC_IDLE_US   1000u
+
 #define F_CPU_HZ              8000000UL   // DCO 8 MHz 
 #define PWM_FREQ_HZ           19000UL     // ~20 kHz PWM 
 #define SYSTICK_HZ            1000UL      // 1 kHz system tick 
@@ -147,9 +152,6 @@ static void clock_init_8MHz(void){
 }
 
 static void gpio_init(void){
-    /* LED (P1.0) */
-    P1DIR |= BIT0;  
-    P1OUT &= ~BIT0;
 
     // Button (P1.1 pull-up) 
     P1DIR &= ~BIT1;
@@ -171,6 +173,10 @@ static void gpio_init(void){
     P2SEL0 |= BIT7;
     P2SEL1 &= ~BIT7;
 
+    P2DIR  |= BIT6;      // P1.2 as output
+    P2SEL0 |= BIT6;      // Select primary module function
+    P2SEL1 &= ~BIT6;
+
     // ADC analog pins: P8.6=A5, P8.7=A4
     P8SEL0 |= BIT6 | BIT7;   // select peripheral function
     P8SEL1 &= ~(BIT6 | BIT7); // make sure it's primary (not secondary/tertiary)
@@ -179,15 +185,24 @@ static void gpio_init(void){
 }
 
 static void timer_pwm_init(void){
-    TB0CCR0  = PWM_TICKS - 1;
-    TB0CCR6  = 0;
-    TB0CCTL6 = OUTMOD_7;
-    TB0CTL   = TBSSEL__SMCLK | MC__UP | TBCLR;
 
-    TB0CCR0  = PWM_TICKS - 1;
-    TB0CCR2  = 0;
+    // TB0: 1 tick = 1 us  (SMCLK 8MHz / 8 = 1MHz)
+    TB0CTL = TBSSEL__SMCLK | ID_3 | MC__UP | TBCLR;
+
+    // 20ms period for servo-style ESC signals
+    TB0CCR0 = 20000 - 1;        // 20,000 ticks @1MHz
+
+    // ESC output on TB0.5  (P2.6)
+    TB0CCTL5 = OUTMOD_7;        // Reset/Set output mode
+    TB0CCR5 = ESC_IDLE_US;      // Start at 1000µs idle
+
+    // ---- OPTIONAL: keep your original fast PWM channels
+    // If you're actually using TB0.2 and TB0.6 for motor drivers:
     TB0CCTL2 = OUTMOD_7;
-    TB0CTL   = TBSSEL__SMCLK | MC__UP | TBCLR;
+    TB0CCR2  = 0;
+
+    TB0CCTL6 = OUTMOD_7;
+    TB0CCR6  = 0;
 }
 
 
@@ -213,6 +228,13 @@ static void clear_fault(void){
     P1OUT &= ~BIT0;
     pwm_enable(true);
 }
+static void delay_ms(unsigned long ms)
+{
+    while (ms--)
+    {
+        __delay_cycles(1000);  // 1 ms at 1 MHz
+    }
+}
 //Speed control functions
 void set_speed_A_percent(uint8_t pct){
     if (pct > 100) pct = 100;
@@ -224,10 +246,50 @@ void set_speed_B_percent(uint8_t pct){
     dutyB = (uint16_t)((uint32_t)PWM_TICKS * pct / 100U);
     pwm_apply();
 }
+static void setPulse_us(uint16_t us)
+{
+    if (us < 500u)
+        us = 500u;     // safety clamp (optional)
+    if (us > 2500u)
+        us = 2500u;    // safety clamp (optional)
 
-// DEMO---------------------
+    TB0CCR5 = us;      // 1 tick = 1 µs
+}
+static void rampTo_us(uint16_t targetUs,
+                      unsigned long durationMs,
+                      unsigned int steps)
+{
+    float start    = 1000;
+    float end      = (float)targetUs;
+    float stepVal  = (end - start) / (float)steps;
+    unsigned long stepDelayMs = durationMs / steps;
 
+    float cur = start;
+    unsigned int i;
 
+    for (i = 0; i < steps; ++i)
+    {
+        cur += stepVal;
+        setPulse_us((uint16_t)cur);
+        delay_ms(stepDelayMs);
+    }
+
+    /* Ensure we end exactly at target */
+    setPulse_us(targetUs);
+}
+void MOTOR_ON(void)
+{
+    P1DIR |= BIT0;
+    P1OUT |= BIT0;      // turn on LED while motor command set
+    setPulse_us(RUN_US);
+    __delay_cycles(80000); // small visible flash (optional)
+    P1OUT &= ~BIT0;
+}
+
+void MOTOR_OFF(void)
+{
+    setPulse_us(ESC_IDLE_US); // don't set 0! use idle pulse
+}
 
 // Main----------------------
 int main(void){
@@ -237,11 +299,11 @@ int main(void){
     P2DIR |= BIT1 | BIT2 | BIT3 | BIT4;   // Set P2.1–P2.4 as outputs
     P2OUT &= ~(BIT1 | BIT2 | BIT3 | BIT4);
 
-    initCapture();
     clock_init_8MHz();
     gpio_init();
     adc12_init();
     timer_pwm_init();
+    initCapture();
 
     __enable_interrupt();
 
@@ -250,44 +312,59 @@ int main(void){
 
 
     while (1){
+        
         if (gotPulse) {
             gotPulse = 0;
             uint16_t us = pulseWidth;
             ms_since_pulse = 0; 
 
-            if ( us > 30000 && us < 33500)
+            if ( us >5000 && us < 30000)
             {
+                
+
+            }
+            else if ( us > 30000 && us < 33500)
+            {
+                MOTOR_ON();
                 dir_A_forward(); dir_B_forward();
                 set_speed_A_percent(35); set_speed_B_percent(35);
                 
             }
             else if ( us > 34000 && us < 35000)
             {
+                MOTOR_OFF();
                 dir_A_reverse(); dir_B_forward();
                 set_speed_A_percent(35); set_speed_B_percent(35);
                 
             }
             else if ( us > 35000 && us <36000)
             {
+                MOTOR_OFF();
                 dir_A_forward(); dir_B_reverse();
                 set_speed_A_percent(35); set_speed_B_percent(35);
                 
             }
-            else if ( us > 36000 && us <38000)
+            else if ( us > 36000 && us <36500)
             {
+                MOTOR_ON();
                 dir_A_reverse(); dir_B_reverse();
                 set_speed_A_percent(35); set_speed_B_percent(35);
                 
             }
+            else if (us >36500 && us < 60000)
+            {
+            
+            }
+       }
 
-        }
         else {
         // crude 1 ms tick — interrupts still run
         __delay_cycles(F_CPU_HZ/1000); // 1 ms delay (approx, F_CPU_HZ must be correct)
             if (++ms_since_pulse >= NO_SIGNAL_MS){
             stop_motors();
-            }      
+            }    
         }
+        
     }
 }
 
